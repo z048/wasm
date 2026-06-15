@@ -22,7 +22,7 @@ The AI methods **only suggest** a move; they do not change the board:
 - `chaos(depth, tau)` returns the spawn the net would play.
 
 You apply a move (whether it came from the AI or a human) with `slide(dir)` / `spawn(x, y, rank)`. This
-suggest-then-apply split lets the same methods serve PvE, PvP, and EvE — the harness decides, per phase,
+suggest-then-apply split lets the same methods serve PvE, PvP, and EvE — the caller decides, per phase,
 whether to call `order`/`chaos` (AI) or feed in a human move. A single `Rater` drives both sides, and a
 process-wide entropy-seeded `Dicer` provides randomness (board init and sampling).
 
@@ -43,48 +43,38 @@ The output lands in `pkg/` (`wasm_bg.wasm` plus the ES-module glue `wasm.js`).
 > `cargo`/`rustc` resolve to one that doesn't (e.g. a Homebrew install shadowing rustup), you'll see
 > *can't find crate for `std`*; make sure the wasm-capable toolchain is the one on `PATH`.
 >
-> **getrandom.** candle (via `rand 0.9`) pulls in `getrandom 0.3`, which needs its `wasm_js` backend on
-> wasm — already enabled in `Cargo.toml` (`getrandom = { version = "0.3", features = ["wasm_js"] }`).
+> **getrandom.** `rand 0.9` (used here and by candle) pulls in `getrandom 0.3`, which needs its `wasm_js`
+> backend on wasm — already enabled in `Cargo.toml` (`getrandom = { version = "0.3", features = ["wasm_js"] }`).
 
-## Run the demo
+## Model
 
-`index.html` + `main.js` (zero framework, plain ES module + DOM) import the built `pkg/`. It **must be
-served over HTTP** — wasm cannot be loaded from `file://`. After building:
+`new Game(bytes)` takes a **postcard-serialized** z048 model — exactly the bytes `Rater::save` writes:
+`postcard` of `Vec<(Vec<f32>, Vec<f32>)>`, one `(weights, bias)` pair per layer (weights flat, row-major
+`in × out`). The dims chain from the 256-wide input (4×4×16 one-hot) to a 2-output head. Train and export a
+network with z048, then load its bytes here. It is a binary format — not human-readable JSON.
 
-```sh
-python3 -m http.server 8000
-# open http://localhost:8000
+## Usage from JavaScript
+
+wasm must be served over HTTP (it cannot be loaded from `file://`):
+
+```js
+import init, { Game } from './pkg/wasm.js';
+
+await init();
+const bytes = new Uint8Array(await (await fetch('./model.bin')).arrayBuffer());
+const game = new Game(bytes);
+
+// One half-move: ask the AI, then apply its suggestion.
+if (!game.phase()) {                 // slide turn
+  const dir = game.order(2, 0.0);
+  if (dir !== undefined) game.slide(dir);
+} else {                             // spawn turn
+  const mv = game.chaos(2, 0.0);
+  if (mv) game.spawn(mv[0], mv[1], mv[2]);
+}
 ```
 
-- **EvE** — AI vs AI: a timer steps each phase, asking `order`/`chaos` and applying via `slide`/`spawn`.
-- **PvE** — you play the slide side (WASD / arrow keys; illegal moves are ignored) and the AI plays spawn.
-
-### Model
-
-The page tries `fetch('./models.json')`:
-
-- **Found** → the JSON is passed to `new Game(json)` to build the rater.
-- **Missing** → the demo generates an all-zero net in JS as the no-checkpoint baseline. An all-zero net has
-  output ≡ 0, i.e. V≡0, which is exactly the pure ΔΦ-greedy minimax player.
-
-Drop a real z048 export at `models.json` (repo root) to use a trained network.
-
-### Model JSON format
-
-The model is the JSON serialization of `Vec<(String, Vec<usize>, Vec<f32>)>` — one triple per tensor,
-`[name, shape, flat_data]`. Weights are stored `[in, out]`, biases `[out]`; the layers chain
-`256 → 128 → 32 → 2` (input = 4×4×16, head = 2 outputs):
-
-```json
-[
-  ["0.weight", [256, 128], [/* 256×128 f32 */]],
-  ["0.bias",   [128],      [/* 128 f32 */]],
-  ["1.weight", [128, 32],  [/* … */]],
-  ["1.bias",   [32],       [/* … */]],
-  ["2.weight", [32, 2],    [/* … */]],
-  ["2.bias",   [2],        [/* … */]]
-]
-```
+For a human move, call `game.slide(dir)` / `game.spawn(x, y, rank)` directly instead of `order` / `chaos`.
 
 ## `Game` API (`#[wasm_bindgen]`)
 
@@ -92,7 +82,7 @@ Construction:
 
 | Method | Description |
 | --- | --- |
-| `new Game(json: string)` | Parse the model JSON, build the rater, and seed a random board from the global dicer. Starts in the slide phase. |
+| `new Game(bytes: Uint8Array)` | Build the rater from postcard model bytes and seed a random board from the global dicer. Starts in the slide phase. |
 | `reset()` | Start a fresh game: new random board, back to the slide phase (keeps the loaded model). |
 
 Read-only:
@@ -120,15 +110,3 @@ Apply a move (no-op if it's the wrong phase or the move is illegal):
 
 `tau` defaults to `0.0` (greedy); `depth` is best kept in `1..=3` — deeper search is **much** slower
 because each ply expands both the slide and spawn branches, so the branching factor compounds.
-
-Typical loop: query the AI, then apply its suggestion —
-
-```js
-if (!game.phase()) {                 // slide turn
-  const dir = game.order(2, 0.0);
-  if (dir !== undefined) game.slide(dir);
-} else {                             // spawn turn
-  const mv = game.chaos(2, 0.0);
-  if (mv) game.spawn(mv[0], mv[1], mv[2]);
-}
-```
