@@ -2,7 +2,6 @@
 compile_error!("wasm32-unknown-unknown only");
 
 use rand::Rng;
-use serde_json::from_str;
 use std::sync::LazyLock;
 use std::sync::Mutex;
 use wasm_bindgen::prelude::wasm_bindgen;
@@ -22,9 +21,9 @@ pub struct Game {
 #[wasm_bindgen]
 impl Game {
     #[wasm_bindgen(constructor)]
-    pub fn new(json: &str) -> Game {
+    pub fn new(bytes: &[u8]) -> Game {
         console_error_panic_hook::set_once();
-        let rater = Rater::from(from_str::<Vec<(String, Vec<usize>, Vec<f32>)>>(json).expect("parse model json"));
+        let rater = Rater::from(bytes);
         let board = Board::from(DICER.lock().expect("lock global dicer").random::<u64>());
         let phase = false;
         Game { rater, board, phase }
